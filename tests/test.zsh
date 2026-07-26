@@ -63,6 +63,21 @@ observer_test
 kill "$holder" 2>/dev/null || true
 wait "$holder" 2>/dev/null || true
 
+# 当前安装器实际使用 staging/<version>.<pid>.<timestamp>/<binary>，同样必须按句柄归属识别。
+timestamp_dir="$CCVER_STAGING_DIR/9.9.6.4321.987654321"
+mkdir -p "$timestamp_dir"
+timestamp_file="$timestamp_dir/claude"
+zsh -c 'exec 8>"$1"; printf abc >&8; sleep 3' hold "$timestamp_file" & timestamp_holder=$!
+sleep 0.3
+timestamp_observer_test() {
+    local REPLY="" REPLY_COUNT=0
+    ccver_find_staging_file 9.9.6 "$timestamp_holder"
+    [[ "$REPLY" == "$timestamp_file" && "$REPLY_COUNT" -eq 1 ]]
+}
+timestamp_observer_test
+kill "$timestamp_holder" 2>/dev/null || true
+wait "$timestamp_holder" 2>/dev/null || true
+
 # 双 target 必须串行持锁，最终默认版本保持不变。
 : > "$CCVER_EVENTS"
 export CCVER_MOCK_SLEEP=0.5

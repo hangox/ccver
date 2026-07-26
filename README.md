@@ -2,7 +2,7 @@
 
 `ccver` 是 macOS-first、zsh-only 的 Claude Code native 多版本管理器。
 
-它提供版本安装、默认版本切换、独立 pin 和真实下载进度。`ccver` 不接管下载、校验、重试或安装：唯一安装器始终是官方命令 `claude install <target>`。下载进度仅通过安装器 PID/子孙进程持有的 native staging 文件进行旁路观测；无法可靠观测时自动退化为 spinner。
+它提供版本安装、默认版本切换、独立 pin 和真实下载进度。`ccver` 不接管下载、校验、重试或安装：唯一安装器始终是官方命令 `claude install <target>`。下载进度仅通过安装器 PID/子孙进程持有的 native staging 文件进行旁路观测，兼容 `staging/<version>/<binary>` 与 `staging/<version>.<pid>.<timestamp>/<binary>`；无法可靠确认唯一归属时自动退化为 spinner。
 
 ## 安装
 

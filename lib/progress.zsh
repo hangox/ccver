@@ -64,13 +64,16 @@ function ccver_pid_holds_file() {
     return 1
 }
 
+# 同时兼容 staging/<version>/<binary> 与实际安装器使用的
+# staging/<version>.<pid>.<timestamp>/<binary>。路径只生成候选，最终仍须由
+# installer PID 或递归子孙进程唯一持有文件句柄，才能读取进度。
 function ccver_find_staging_file() {
     local target="$1" installer_pid="$2" candidate
     local -a candidates REPLY_PIDS
     REPLY=""; REPLY_COUNT=0
     [[ -d "$CCVER_STAGING_DIR" ]] || return 1
     ccver_process_tree_pids "$installer_pid"
-    candidates=("$CCVER_STAGING_DIR/$target"/*(N.))
+    candidates=("$CCVER_STAGING_DIR/$target"/*(N.) "$CCVER_STAGING_DIR/$target".*/*(N.))
     for candidate in "${candidates[@]}"; do
         ccver_pid_holds_file "$candidate" "${REPLY_PIDS[@]}" || continue
         REPLY_COUNT=$((REPLY_COUNT + 1)); REPLY="$candidate"
