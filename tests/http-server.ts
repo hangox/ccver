@@ -65,7 +65,11 @@ const server = createServer((request, response) => {
   const end = Math.min(Number(rangeMatch[2]), data.length - 1);
   const chunk = data.subarray(start, end + 1);
   const contentRange = version === "9.9.4" ? `bytes ${start}-${end}/${data.length + 1}` : `bytes ${start}-${end}/${data.length}`;
-  const responseEtag = version === "9.9.5" && start > 0 ? '"changed-etag"' : etag;
+  const responseEtag = version === "9.9.5" && start > 0
+    ? '"changed-etag"'
+    : version === "9.9.10"
+      ? 'W/"weak-etag"'
+      : etag;
   activeRanges++;
   maxActiveRanges = Math.max(maxActiveRanges, activeRanges);
   event(`active=${activeRanges} max=${maxActiveRanges}`);

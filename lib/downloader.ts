@@ -16,12 +16,20 @@ import {
 import { createReadStream } from "node:fs";
 import { basename, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 const EXIT_DATA = 65;
 const EXIT_CONFLICT = 73;
 const EXIT_FALLBACK = 75;
-const EXPECTED_IDENTIFIER = process.env.CCVER_CODESIGN_IDENTIFIER ?? "com.anthropic.claude-code";
-const EXPECTED_TEAM_ID = process.env.CCVER_CODESIGN_TEAM_ID ?? "Q6L2SF6YDW";
+const EXPECTED_IDENTIFIER = "com.anthropic.claude-code";
+const EXPECTED_TEAM_ID = "Q6L2SF6YDW";
+const CODESIGN_PATH = "/usr/bin/codesign";
+
+type RuntimeDependencies = {
+  signatureError: (path: string) => string | undefined;
+};
+
+let runtimeDependencies: RuntimeDependencies;
 
 class CcverError extends Error {
   readonly exitCode: number;
@@ -55,7 +63,9 @@ type ResumeState = {
   completed: number[];
 };
 
-const target = process.argv[2] ?? "";
+const hasExplicitMode = process.argv[2]?.startsWith("--") ?? false;
+const cliMode = hasExplicitMode ? process.argv[2] : "--install";
+const target = hasExplicitMode ? process.argv[3] ?? "" : process.argv[2] ?? "";
 const releasesUrl = process.env.CCVER_RELEASES_URL ?? "https://downloads.claude.ai/claude-code-releases";
 const cacheHome = process.env.CCVER_CACHE_HOME ?? join(process.env.HOME ?? "", ".cache");
 const versionsDir = process.env.CCVER_VERSIONS_DIR ?? join(process.env.HOME ?? "", ".local/share/claude/versions");
@@ -177,6 +187,7 @@ async function probeRange(url: string, size: number): Promise<string> {
     if (contentRange !== `bytes 0-0/${size}`) failClosed(`Range 探测 Content-Range 不匹配: ${contentRange}`);
     const etag = response.headers.get("etag");
     if (!etag) failClosed("Range 响应缺少 ETag，拒绝无身份分块下载");
+    if (/^W\//i.test(etag)) failClosed("Range 响应使用 weak ETag，拒绝无强身份分块下载");
     const body = await response.arrayBuffer();
     throwIfCancelled();
     if (body.byteLength !== 1) failClosed(`Range 探测长度异常: ${body.byteLength}`);
@@ -392,7 +403,17 @@ async function downloadChunks(url: string, directory: string, state: ResumeState
         await file!.sync();
         await file!.close();
         file = undefined;
-        await rename(temporary, final);
+        try {
+          await link(temporary, final);
+          await unlink(temporary);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const existing = await stat(final).catch(() => undefined);
+          if (!existing || !existing.isFile() || existing.size !== expectedLength) conflict(`分块 ${index} 已存在但元数据不可信`);
+          const [temporaryChecksum, existingChecksum] = await Promise.all([sha256File(temporary), sha256File(final)]);
+          if (temporaryChecksum !== existingChecksum) conflict(`分块 ${index} 已存在但内容冲突`);
+          await unlink(temporary).catch(() => {});
+        }
         await saveCompletion(index);
         progress?.complete(index, expectedLength);
       } catch (error) {
@@ -447,12 +468,10 @@ async function sha256File(path: string): Promise<string> {
 }
 
 function verifySignature(path: string): void {
-  if (process.env.CCVER_TEST_CODESIGN === "pass") return;
-  if (process.env.CCVER_TEST_CODESIGN === "fail") failClosed("代码签名验证失败: 测试注入");
-  const verify = spawnSync("codesign", ["--verify", "--strict", "--verbose=2", path], { encoding: "utf8" });
-  if (verify.error && (verify.error as NodeJS.ErrnoException).code === "ENOENT") fallback("缺少 codesign，切换官方安装器");
+  const verify = spawnSync(CODESIGN_PATH, ["--verify", "--strict", "--verbose=2", path], { encoding: "utf8" });
+  if (verify.error && (verify.error as NodeJS.ErrnoException).code === "ENOENT") fallback("缺少系统 codesign，切换官方安装器");
   if (verify.status !== 0) failClosed(`代码签名验证失败: ${(verify.stderr || verify.stdout).trim()}`);
-  const details = spawnSync("codesign", ["-d", "--verbose=4", path], { encoding: "utf8" });
+  const details = spawnSync(CODESIGN_PATH, ["-d", "--verbose=4", path], { encoding: "utf8" });
   if (details.status !== 0) failClosed(`无法读取代码签名详情: ${(details.stderr || details.stdout).trim()}`);
   const output = `${details.stdout}\n${details.stderr}`;
   const identifier = /^Identifier=(.+)$/m.exec(output)?.[1]?.trim();
@@ -461,12 +480,16 @@ function verifySignature(path: string): void {
   if (teamId !== EXPECTED_TEAM_ID) failClosed(`签名 TeamIdentifier 不匹配: ${teamId ?? "缺失"}`);
 }
 
-async function verifyBinary(path: string, expectedSize: number, expectedChecksum: string): Promise<void> {
+async function verifyBinary(path: string, expectedSize: number | undefined, expectedChecksum: string | undefined): Promise<void> {
   const metadata = await stat(path);
-  if (metadata.size !== expectedSize) failClosed(`二进制大小不匹配: ${metadata.size}/${expectedSize}`);
-  const checksum = await sha256File(path);
-  if (checksum !== expectedChecksum) failClosed(`SHA-256 不匹配: ${checksum}`);
-  verifySignature(path);
+  if (!metadata.isFile() || (metadata.mode & 0o111) === 0) failClosed("目标不是可执行普通文件");
+  if (expectedSize !== undefined && metadata.size !== expectedSize) failClosed(`二进制大小不匹配: ${metadata.size}/${expectedSize}`);
+  if (expectedChecksum !== undefined) {
+    const checksum = await sha256File(path);
+    if (checksum !== expectedChecksum) failClosed(`SHA-256 不匹配: ${checksum}`);
+  }
+  const signatureError = runtimeDependencies.signatureError(path);
+  if (signatureError) failClosed(signatureError);
 }
 
 async function atomicCommit(staging: string, final: string, state: ResumeState): Promise<void> {
@@ -512,8 +535,28 @@ function removeSignalHandlers(): void {
   signalHandlers = [];
 }
 
-async function main(): Promise<void> {
+function validateTarget(): void {
   if (!/^[A-Za-z0-9._+-]+$/.test(target) || target.includes("..") || target === ".") failClosed(`目标版本不安全: ${target}`);
+}
+
+async function verifyInstalled(withManifest: boolean): Promise<void> {
+  validateTarget();
+  const final = join(versionsDir, target);
+  try {
+    if (withManifest) {
+      const manifest = await fetchManifest(platformName());
+      await verifyBinary(final, manifest.size, manifest.checksum);
+    } else {
+      await verifyBinary(final, undefined, undefined);
+    }
+  } catch (error) {
+    if (error instanceof CcverError && error.exitCode === EXIT_FALLBACK) throw error;
+    conflict(`已安装版本 ${target} 未通过官方身份验证: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function install(): Promise<void> {
+  validateTarget();
   installSignalHandlers();
   const platform = platformName();
   progress?.setPhase("读取 manifest");
@@ -537,6 +580,7 @@ async function main(): Promise<void> {
   const staging = await assemble(directory, state);
   try {
     throwIfCancelled();
+    await chmod(staging, 0o755);
     await verifyBinary(staging, state.size, state.checksum);
     throwIfCancelled();
     progress?.setPhase("原子安装");
@@ -549,7 +593,24 @@ async function main(): Promise<void> {
   progress?.finish(`已安全安装 ${target}`);
 }
 
-async function run(): Promise<number> {
+async function main(): Promise<void> {
+  switch (cliMode) {
+    case "--install": await install(); return;
+    case "--verify-installed": await verifyInstalled(false); return;
+    case "--verify-release": await verifyInstalled(true); return;
+    default: failClosed(`未知内部命令: ${cliMode}`);
+  }
+}
+
+export async function execute(dependencies: RuntimeDependencies = { signatureError: (path) => {
+  try {
+    verifySignature(path);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+} }): Promise<number> {
+  runtimeDependencies = dependencies;
   try {
     await main();
     return 0;
@@ -573,13 +634,16 @@ async function run(): Promise<number> {
   }
 }
 
-// Node 不会仅因为 Promise 未结算而维持事件循环；用一个明确受控的句柄承载整个生命周期，
-// 并在成功或失败结算后统一释放，避免顶层 await 的 rc13 和无活动句柄时提前 rc0。
-const lifecycleKeepAlive = setInterval(() => {}, 1000);
-run().then(
-  (exitCode) => { process.exitCode = exitCode; },
-  (error) => {
-    process.stderr.write(`ccver: 无法结算安装流程: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-    process.exitCode = 70;
-  },
-).finally(() => clearInterval(lifecycleKeepAlive));
+const isDirectExecution = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectExecution) {
+  // Node 不会仅因为 Promise 未结算而维持事件循环；用一个明确受控的句柄承载整个生命周期，
+  // 并在成功或失败结算后统一释放，避免无活动句柄时提前退出。
+  const lifecycleKeepAlive = setInterval(() => {}, 1000);
+  execute().then(
+    (exitCode) => { process.exitCode = exitCode; },
+    (error) => {
+      process.stderr.write(`ccver: 无法结算安装流程: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+      process.exitCode = 70;
+    },
+  ).finally(() => clearInterval(lifecycleKeepAlive));
+}

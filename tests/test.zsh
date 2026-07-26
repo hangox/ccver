@@ -6,15 +6,19 @@ ROOT="${0:A:h:h}"
 NODE_BIN="$(command -v node)"
 for file in "$ROOT"/bin/ccver "$ROOT"/lib/*.zsh "$ROOT"/install.sh; do zsh -n "$file"; done
 "$NODE_BIN" --check "$ROOT/lib/downloader.ts"
+"$NODE_BIN" --check "$ROOT/tests/downloader-runner.ts"
 "$NODE_BIN" --check "$ROOT/tests/http-server.ts"
 
 sandbox=$(mktemp -d)
 server_pid=""
 trap '[[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null || true; [[ -n "$server_pid" ]] && wait "$server_pid" 2>/dev/null || true; trash "$sandbox" 2>/dev/null || command rm -rf "$sandbox"' EXIT
 export HOME="$sandbox/home" XDG_DATA_HOME="$sandbox/data" XDG_CACHE_HOME="$sandbox/cache"
-export CCVER_EVENTS="$sandbox/events" CCVER_NODE_BIN="$NODE_BIN" CCVER_TEST_CODESIGN=pass PATH="$sandbox/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export CCVER_EVENTS="$sandbox/events" CCVER_NODE_BIN="$NODE_BIN" CCVER_TEST_SIGNATURE_MODE=pass PATH="$sandbox/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$HOME/.local/bin" "$XDG_DATA_HOME/claude/versions" "$XDG_DATA_HOME/ccver" "$XDG_CACHE_HOME/claude/staging" "$sandbox/bin"
-printf '#!/bin/sh\nexit 0\n' > "$XDG_DATA_HOME/claude/versions/1.0.0"
+export CCVER_TEST_BINARY="$sandbox/claude-fixture"
+"$NODE_BIN" -e 'const fs=require("fs");const data=Buffer.allocUnsafe(512*1024);for(let i=0;i<data.length;i++)data[i]=i%251;fs.writeFileSync(process.argv[1],data)' "$CCVER_TEST_BINARY"
+chmod +x "$CCVER_TEST_BINARY"
+command cp "$CCVER_TEST_BINARY" "$XDG_DATA_HOME/claude/versions/1.0.0"
 chmod +x "$XDG_DATA_HOME/claude/versions/1.0.0"
 ln -s "$XDG_DATA_HOME/claude/versions/1.0.0" "$HOME/.local/bin/claude"
 printf '1.0.0\n' > "$XDG_DATA_HOME/ccver/pinned-version"
@@ -24,7 +28,7 @@ cat > "$sandbox/bin/claude" <<'MOCK'
 target="$2"
 print "official $target" >> "$CCVER_EVENTS"
 mkdir -p "$XDG_DATA_HOME/claude/versions"
-printf '#!/bin/sh\nexit 0\n' > "$XDG_DATA_HOME/claude/versions/$target"
+command cp "$CCVER_TEST_BINARY" "$XDG_DATA_HOME/claude/versions/$target"
 chmod +x "$XDG_DATA_HOME/claude/versions/$target"
 [[ "$target" == 9.9.8 ]] && exit 37
 exit 0
@@ -117,6 +121,20 @@ export CCVER_ASSEMBLY_DIR="$XDG_DATA_HOME/claude/versions/.ccver-staging"
 export CCVER_VERSIONS_DIR="$XDG_DATA_HOME/claude/versions"
 export CCVER_VERSION_LOCKS_DIR="$XDG_DATA_HOME/ccver/version-locks"
 export CCVER_CHUNK_SIZE=65536 CCVER_DOWNLOAD_WORKERS=4 CCVER_REQUEST_TIMEOUT_MS=5000
+function ccver_downloader() {
+    local mode="$1" target="$2"
+    ccver_node_supported || return 75
+    CCVER_RELEASES_URL="$CCVER_RELEASES_URL" CCVER_CACHE_HOME="$CCVER_CACHE_HOME" \
+    CCVER_VERSIONS_DIR="$CCVER_VERSIONS_DIR" CCVER_DOWNLOADS_DIR="$CCVER_DOWNLOADS_DIR" \
+    CCVER_ASSEMBLY_DIR="$CCVER_ASSEMBLY_DIR" CCVER_DOWNLOAD_WORKERS="$CCVER_DOWNLOAD_WORKERS" \
+    CCVER_CHUNK_SIZE="$CCVER_CHUNK_SIZE" CCVER_REQUEST_TIMEOUT_MS="$CCVER_REQUEST_TIMEOUT_MS" \
+    "$CCVER_NODE_BIN" "$ROOT/tests/downloader-runner.ts" "$mode" "$target"
+}
+function ccver_verify_native_identity() {
+    local target="$1"
+    [[ -f "$CCVER_VERSIONS_DIR/$target" && -x "$CCVER_VERSIONS_DIR/$target" ]] || return 73
+    [[ "$CCVER_TEST_SIGNATURE_MODE" == pass ]] || return 73
+}
 
 # 默认自研路径：并发 Range、size/hash/signature、原子 no-clobber，且不调用官方 fallback。
 : > "$CCVER_EVENTS"; : > "$http_events"
@@ -151,7 +169,7 @@ TERM=dumb ccver_install_preserve_default 9.9.9 >/dev/null 2>&1
 [[ "$(<"$CCVER_EVENTS")" == 'official 9.9.9' ]]
 
 # manifest、Content-Range、ETag、checksum、签名异常必须 fail-closed，禁止官方 fallback。
-for version in 9.9.3 9.9.4 9.9.5 9.9.6; do
+for version in 9.9.3 9.9.4 9.9.5 9.9.6 9.9.10; do
     : > "$CCVER_EVENTS"
     set +e
     TERM=dumb ccver_install_preserve_default "$version" >/dev/null 2>&1
@@ -162,26 +180,60 @@ for version in 9.9.3 9.9.4 9.9.5 9.9.6; do
 done
 
 # ETag 漂移路径必须稳定收敛：连续 20 次均返回 65、没有官方 fallback、没有 Node rc13/unsettled await。
-for attempt in {1..20}; do
-    trash "$CCVER_DOWNLOADS_DIR/9.9.5" 2>/dev/null || true
-    : > "$CCVER_EVENTS"
-    drift_stderr="$sandbox/etag-drift-$attempt.stderr"
-    set +e
-    TERM=dumb ccver_install_preserve_default 9.9.5 >/dev/null 2>"$drift_stderr"
-    rc=$?
-    set -e
-    [[ "$rc" -eq 65 ]]
-    [[ ! -s "$CCVER_EVENTS" ]]
-    ! grep -Eq 'unsettled top-level await|Detected unsettled|exit code 13' "$drift_stderr"
+for workers in {1..8}; do
+    for attempt in {1..20}; do
+        trash "$CCVER_DOWNLOADS_DIR/9.9.5" 2>/dev/null || true
+        : > "$CCVER_EVENTS"
+        drift_stderr="$sandbox/etag-drift-$workers-$attempt.stderr"
+        set +e
+        CCVER_DOWNLOAD_WORKERS="$workers" TERM=dumb ccver_install_preserve_default 9.9.5 >/dev/null 2>"$drift_stderr"
+        rc=$?
+        set -e
+        [[ "$rc" -eq 65 ]]
+        [[ ! -s "$CCVER_EVENTS" ]]
+        ! grep -Eq 'unsettled top-level await|Detected unsettled|exit code 13' "$drift_stderr"
+    done
 done
 
+# 已安装的未知/篡改 final 不能靠 -x 早退，也不能被 use/pin 激活。
+printf '伪造二进制' > "$CCVER_VERSIONS_DIR/9.8.1"
+chmod +x "$CCVER_VERSIONS_DIR/9.8.1"
 : > "$CCVER_EVENTS"
-export CCVER_TEST_CODESIGN=fail
+set +e
+TERM=dumb ccver_install_preserve_default 9.8.1 >/dev/null 2>&1
+install_untrusted_rc=$?
+CCVER_TEST_SIGNATURE_MODE=fail ccver_switch_default 9.8.1 >/dev/null 2>&1
+use_untrusted_rc=$?
+set -e
+[[ "$install_untrusted_rc" -eq 73 && "$use_untrusted_rc" -eq 73 && ! -s "$CCVER_EVENTS" ]]
+[[ "$(readlink "$CCVER_BIN_LINK")" == "$CCVER_VERSIONS_DIR/1.0.0" ]]
+
+# Node 18/20 不运行 TypeScript downloader，明确返回 75，由上层走允许的官方 fallback。
+real_node_bin="$CCVER_NODE_BIN"
+cat > "$sandbox/bin/node20" <<'MOCK_NODE20'
+#!/bin/zsh
+[[ "$1" == -p ]] && { print 20.19.0; exit 0; }
+exit 99
+MOCK_NODE20
+chmod +x "$sandbox/bin/node20"
+CCVER_NODE_BIN="$sandbox/bin/node20"
+set +e
+ccver_install_fast 9.8.2 >/dev/null 2>&1
+node20_fast_rc=$?
+set -e
+[[ "$node20_fast_rc" -eq 75 ]]
+: > "$CCVER_EVENTS"
+TERM=dumb ccver_install_target 9.8.2 >/dev/null 2>&1
+[[ "$(<"$CCVER_EVENTS")" == 'official 9.8.2' ]]
+CCVER_NODE_BIN="$real_node_bin"
+
+: > "$CCVER_EVENTS"
+export CCVER_TEST_SIGNATURE_MODE=fail
 set +e
 TERM=dumb ccver_install_preserve_default 9.9.7 >/dev/null 2>&1
 rc=$?
 set -e
-export CCVER_TEST_CODESIGN=pass
+export CCVER_TEST_SIGNATURE_MODE=pass
 [[ "$rc" -eq 65 && ! -s "$CCVER_EVENTS" ]]
 
 # final 冲突必须返回 73，不能覆盖或 fallback。
@@ -257,7 +309,7 @@ set -e
 [[ "$rc" -eq 130 ]]
 [[ "$(<"$CCVER_EVENTS")" == *got-term* ]]
 worker_pid="$(grep '^worker=' "$CCVER_EVENTS" | tail -1 | cut -d= -f2)"
-[[ -z "$worker_pid" || ! -e "/proc/$worker_pid" ]]
+[[ -z "$worker_pid" ]] || ! kill -0 "$worker_pid" 2>/dev/null
 
 # 官方失败 rc 原样传递且默认 link/pin 保持。
 cat > "$sandbox/bin/claude" <<'MOCK_FAIL'
