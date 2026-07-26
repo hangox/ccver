@@ -300,10 +300,16 @@ class Progress {
     this.previousBytes = bytes;
     this.previousTime = now;
     const percent = Math.floor((bytes * 100) / this.total);
-    const width = 20;
-    const filled = Math.floor((percent * width) / 100);
     const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    const line = `${frames[this.frame++ % frames.length]} [${"=".repeat(filled)}${"-".repeat(width - filled)}] ${String(percent).padStart(3)}%  ${humanBytes(bytes)}/${humanBytes(this.total)}  ${humanBytes(this.speed)}/s  ${this.phase}`;
+    const line = renderProgressLine(
+      frames[this.frame++ % frames.length],
+      percent,
+      bytes,
+      this.total,
+      this.speed,
+      this.phase,
+      process.stderr.columns,
+    );
     process.stderr.write(`\r[2K${line}`);
   }
 }
@@ -313,6 +319,54 @@ function humanBytes(value: number): string {
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`;
   return `${Math.floor(value)} B`;
+}
+
+function isWideCodePoint(codePoint: number): boolean {
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f
+    || codePoint === 0x2329
+    || codePoint === 0x232a
+    || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xff00 && codePoint <= 0xff60)
+    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    || (codePoint >= 0x1f300 && codePoint <= 0x1f64f)
+    || (codePoint >= 0x1f900 && codePoint <= 0x1f9ff)
+  );
+}
+
+export function terminalCellWidth(value: string): number {
+  let width = 0;
+  for (const character of value.normalize("NFC")) {
+    if (/\p{Mark}/u.test(character) || character === "️") continue;
+    width += isWideCodePoint(character.codePointAt(0) ?? 0) ? 2 : 1;
+  }
+  return width;
+}
+
+export function renderProgressLine(
+  frame: string,
+  percent: number,
+  bytes: number,
+  total: number,
+  speed: number,
+  phase: string,
+  columns?: number,
+): string {
+  const width = 20;
+  const filled = Math.floor((percent * width) / 100);
+  const base = `${frame} [${"=".repeat(filled)}${"-".repeat(width - filled)}] ${String(percent).padStart(3)}%  ${humanBytes(bytes)}/${humanBytes(total)}  ${humanBytes(speed)}/s`;
+  const withPhase = `${base}  ${phase}`;
+  // 末列写满会让 iTerm 设置 pending-wrap；下一帧的 CR/EL 不能撤销已进入 scrollback 的物理行，因此始终预留一列。
+  if (columns === undefined || terminalCellWidth(withPhase) < columns) return withPhase;
+  if (terminalCellWidth(base) < columns) return base;
+
+  const compact = `${frame} ${String(percent).padStart(3)}%  ${humanBytes(bytes)}/${humanBytes(total)}  ${humanBytes(speed)}/s`;
+  if (terminalCellWidth(compact) < columns) return compact;
+  return `${String(percent).padStart(3)}%  ${humanBytes(bytes)}/${humanBytes(total)}`;
 }
 
 async function downloadChunks(url: string, directory: string, state: ResumeState, statePath: string): Promise<void> {

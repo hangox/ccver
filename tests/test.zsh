@@ -6,6 +6,15 @@ ROOT="${0:A:h:h}"
 NODE_BIN="$(command -v node)"
 for file in "$ROOT"/bin/ccver "$ROOT"/lib/*.zsh "$ROOT"/install.sh; do zsh -n "$file"; done
 "$NODE_BIN" --check "$ROOT/lib/downloader.ts"
+CCVER_TEST_MODULE="$ROOT/lib/downloader.ts" "$NODE_BIN" --input-type=module -e '
+import { pathToFileURL } from "node:url";
+const { renderProgressLine, terminalCellWidth } = await import(pathToFileURL(process.env.CCVER_TEST_MODULE).href);
+const narrow = renderProgressLine("⠙", 18, 44.1 * 1024 ** 2, 245 * 1024 ** 2, 1 * 1024 ** 2, "并行下载", 70);
+if (terminalCellWidth(narrow) >= 70) throw new Error(`窄终端进度行溢出: ${terminalCellWidth(narrow)}`);
+if (narrow.includes("并行下载")) throw new Error("70 列终端应优先省略阶段文字");
+const wide = renderProgressLine("⠙", 18, 44.1 * 1024 ** 2, 245 * 1024 ** 2, 1 * 1024 ** 2, "并行下载", 100);
+if (!wide.includes("并行下载")) throw new Error("宽终端应保留阶段文字");
+'
 "$NODE_BIN" --check "$ROOT/tests/downloader-runner.ts"
 "$NODE_BIN" --check "$ROOT/tests/http-server.ts"
 
