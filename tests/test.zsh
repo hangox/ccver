@@ -161,6 +161,20 @@ for version in 9.9.3 9.9.4 9.9.5 9.9.6; do
     [[ ! -s "$CCVER_EVENTS" ]]
 done
 
+# ETag 漂移路径必须稳定收敛：连续 20 次均返回 65、没有官方 fallback、没有 Node rc13/unsettled await。
+for attempt in {1..20}; do
+    trash "$CCVER_DOWNLOADS_DIR/9.9.5" 2>/dev/null || true
+    : > "$CCVER_EVENTS"
+    drift_stderr="$sandbox/etag-drift-$attempt.stderr"
+    set +e
+    TERM=dumb ccver_install_preserve_default 9.9.5 >/dev/null 2>"$drift_stderr"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 65 ]]
+    [[ ! -s "$CCVER_EVENTS" ]]
+    ! grep -Eq 'unsettled top-level await|Detected unsettled|exit code 13' "$drift_stderr"
+done
+
 : > "$CCVER_EVENTS"
 export CCVER_TEST_CODESIGN=fail
 set +e

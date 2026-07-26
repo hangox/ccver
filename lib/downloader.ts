@@ -69,6 +69,7 @@ const operationAbort = new AbortController();
 let cancellationCode = 0;
 let progress: Progress | undefined;
 let activeDownloadDirectory: string | undefined;
+let signalHandlers: Array<[NodeJS.Signals, () => void]> = [];
 
 function boundedInteger(value: string | undefined, defaultValue: number, min: number, max: number): number {
   if (value === undefined || value === "") return defaultValue;
@@ -103,17 +104,35 @@ function throwIfCancelled(): void {
   if (cancellationCode !== 0) throw new CcverError("安装已取消", cancellationCode);
 }
 
-function combinedSignal(): AbortSignal {
-  return AbortSignal.any([operationAbort.signal, AbortSignal.timeout(requestTimeoutMs)]);
-}
+type ResponseHandler<T> = (response: Response) => Promise<T>;
 
-async function fetchChecked(url: string, init: RequestInit, context: string): Promise<Response> {
+async function withResponse<T>(
+  url: string,
+  init: RequestInit,
+  parentSignal: AbortSignal,
+  context: string,
+  handler: ResponseHandler<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(parentSignal.reason);
+  let response: Response | undefined;
+  const timeout = setTimeout(() => controller.abort(new DOMException("请求超时", "TimeoutError")), requestTimeoutMs);
+  if (parentSignal.aborted) controller.abort(parentSignal.reason);
+  else parentSignal.addEventListener("abort", onAbort, { once: true });
+
   try {
-    return await fetch(url, { ...init, signal: combinedSignal(), redirect: "error" });
+    response = await fetch(url, { ...init, signal: controller.signal, redirect: "error" });
+    return await handler(response);
   } catch (error) {
     if (cancellationCode !== 0) throw error;
     if (isNetworkError(error)) fallback(`${context}发生网络错误: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
+  } finally {
+    clearTimeout(timeout);
+    parentSignal.removeEventListener("abort", onAbort);
+    if (response?.body && !response.bodyUsed) {
+      await response.body.cancel().catch(() => {});
+    }
   }
 }
 
@@ -126,41 +145,43 @@ function safeBinaryName(value: unknown): string {
 
 async function fetchManifest(platform: string): Promise<ManifestEntry> {
   const url = `${releasesUrl}/${target}/manifest.json`;
-  const response = await fetchChecked(url, {}, "获取 manifest 时");
-  if (!response.ok) {
-    if (isTransientStatus(response.status)) fallback(`manifest 暂时不可用: HTTP ${response.status}`);
-    failClosed(`manifest 请求失败: HTTP ${response.status}`);
-  }
-  let manifest: any;
-  try {
-    manifest = await response.json();
-  } catch {
-    failClosed("manifest 不是合法 JSON");
-  }
-  if (manifest?.version !== target) failClosed(`manifest 版本不匹配: ${String(manifest?.version)}`);
-  const raw = manifest?.platforms?.[platform];
-  if (!raw) failClosed(`manifest 不包含平台 ${platform}`);
-  const binary = safeBinaryName(raw.binary);
-  if (!Number.isSafeInteger(raw.size) || raw.size <= 0) failClosed("manifest size 字段不合法");
-  if (typeof raw.checksum !== "string" || !/^[0-9a-f]{64}$/.test(raw.checksum)) failClosed("manifest checksum 字段不合法");
-  return { binary, size: raw.size, checksum: raw.checksum };
+  return withResponse(url, {}, operationAbort.signal, "获取 manifest 时", async (response) => {
+    if (!response.ok) {
+      if (isTransientStatus(response.status)) fallback(`manifest 暂时不可用: HTTP ${response.status}`);
+      failClosed(`manifest 请求失败: HTTP ${response.status}`);
+    }
+    let manifest: any;
+    try {
+      manifest = await response.json();
+    } catch {
+      failClosed("manifest 不是合法 JSON");
+    }
+    if (manifest?.version !== target) failClosed(`manifest 版本不匹配: ${String(manifest?.version)}`);
+    const raw = manifest?.platforms?.[platform];
+    if (!raw) failClosed(`manifest 不包含平台 ${platform}`);
+    const binary = safeBinaryName(raw.binary);
+    if (!Number.isSafeInteger(raw.size) || raw.size <= 0) failClosed("manifest size 字段不合法");
+    if (typeof raw.checksum !== "string" || !/^[0-9a-f]{64}$/.test(raw.checksum)) failClosed("manifest checksum 字段不合法");
+    return { binary, size: raw.size, checksum: raw.checksum };
+  });
 }
 
 async function probeRange(url: string, size: number): Promise<string> {
-  const response = await fetchChecked(url, { headers: { Range: "bytes=0-0" } }, "探测 Range 时");
-  if (response.status === 200) fallback("官方 CDN 未响应 Range，切换官方安装器");
-  if (response.status !== 206) {
-    if (isTransientStatus(response.status)) fallback(`Range 探测暂时失败: HTTP ${response.status}`);
-    failClosed(`Range 探测协议异常: HTTP ${response.status}`);
-  }
-  const contentRange = response.headers.get("content-range") ?? "";
-  if (contentRange !== `bytes 0-0/${size}`) failClosed(`Range 探测 Content-Range 不匹配: ${contentRange}`);
-  const etag = response.headers.get("etag");
-  if (!etag) failClosed("Range 响应缺少 ETag，拒绝无身份分块下载");
-  const body = await response.arrayBuffer();
-  throwIfCancelled();
-  if (body.byteLength !== 1) failClosed(`Range 探测长度异常: ${body.byteLength}`);
-  return etag;
+  return withResponse(url, { headers: { Range: "bytes=0-0" } }, operationAbort.signal, "探测 Range 时", async (response) => {
+    if (response.status === 200) fallback("官方 CDN 未响应 Range，切换官方安装器");
+    if (response.status !== 206) {
+      if (isTransientStatus(response.status)) fallback(`Range 探测暂时失败: HTTP ${response.status}`);
+      failClosed(`Range 探测协议异常: HTTP ${response.status}`);
+    }
+    const contentRange = response.headers.get("content-range") ?? "";
+    if (contentRange !== `bytes 0-0/${size}`) failClosed(`Range 探测 Content-Range 不匹配: ${contentRange}`);
+    const etag = response.headers.get("etag");
+    if (!etag) failClosed("Range 响应缺少 ETag，拒绝无身份分块下载");
+    const body = await response.arrayBuffer();
+    throwIfCancelled();
+    if (body.byteLength !== 1) failClosed(`Range 探测长度异常: ${body.byteLength}`);
+    return etag;
+  });
 }
 
 function identityFor(state: Omit<ResumeState, "schemaVersion" | "completed">): string {
@@ -296,8 +317,17 @@ async function downloadChunks(url: string, directory: string, state: ResumeState
   let next = 0;
   let stateWrite: Promise<void> = Promise.resolve();
   let firstError: unknown;
+  let abortReadersPromise: Promise<void> | undefined;
   const workersAbort = new AbortController();
-  const onOperationAbort = () => workersAbort.abort(operationAbort.signal.reason);
+  const activeReaders = new Set<ReadableStreamDefaultReader<Uint8Array>>();
+
+  async function abortWorkers(reason: unknown): Promise<void> {
+    if (!workersAbort.signal.aborted) workersAbort.abort(reason);
+    abortReadersPromise ??= Promise.allSettled([...activeReaders].map((reader) => reader.cancel(reason))).then(() => {});
+    await abortReadersPromise;
+  }
+
+  const onOperationAbort = () => { void abortWorkers(operationAbort.signal.reason); };
   operationAbort.signal.addEventListener("abort", onOperationAbort, { once: true });
 
   async function saveCompletion(index: number): Promise<void> {
@@ -319,37 +349,49 @@ async function downloadChunks(url: string, directory: string, state: ResumeState
       const final = join(directory, `chunk-${index}`);
       let file;
       try {
-        const response = await fetch(url, {
-          headers: { Range: `bytes=${start}-${end}`, "If-Range": state.etag },
-          signal: AbortSignal.any([workersAbort.signal, AbortSignal.timeout(requestTimeoutMs)]),
-          redirect: "error",
-        });
-        if (response.status === 200) failClosed(`分块 ${index} 返回 200，远端身份可能已变化`);
-        if (response.status !== 206) {
-          if (isTransientStatus(response.status)) fallback(`分块 ${index} 暂时失败: HTTP ${response.status}`);
-          failClosed(`分块 ${index} 协议异常: HTTP ${response.status}`);
-        }
-        const expectedRange = `bytes ${start}-${end}/${state.size}`;
-        if (response.headers.get("content-range") !== expectedRange) failClosed(`分块 ${index} Content-Range 不匹配`);
-        if (response.headers.get("etag") !== state.etag) failClosed(`分块 ${index} ETag 漂移`);
-        if (!response.body) fallback(`分块 ${index} 没有响应体`);
+        await withResponse(
+          url,
+          { headers: { Range: `bytes=${start}-${end}`, "If-Range": state.etag } },
+          workersAbort.signal,
+          `分块 ${index} 下载时`,
+          async (response) => {
+            if (response.status === 200) failClosed(`分块 ${index} 返回 200，远端身份可能已变化`);
+            if (response.status !== 206) {
+              if (isTransientStatus(response.status)) fallback(`分块 ${index} 暂时失败: HTTP ${response.status}`);
+              failClosed(`分块 ${index} 协议异常: HTTP ${response.status}`);
+            }
+            const expectedRange = `bytes ${start}-${end}/${state.size}`;
+            if (response.headers.get("content-range") !== expectedRange) failClosed(`分块 ${index} Content-Range 不匹配`);
+            if (response.headers.get("etag") !== state.etag) failClosed(`分块 ${index} ETag 漂移`);
+            if (!response.body) fallback(`分块 ${index} 没有响应体`);
 
-        file = await open(temporary, "wx", 0o600);
-        const reader = response.body.getReader();
-        let received = 0;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!value) continue;
-          received += value.byteLength;
-          if (received > expectedLength) failClosed(`分块 ${index} 超过预期长度`);
-          await file.write(value);
-          progress?.setActive(index, received);
-        }
-        await file.sync();
-        await file.close();
+            file = await open(temporary, "wx", 0o600);
+            const reader = response.body.getReader();
+            activeReaders.add(reader);
+            try {
+              let received = 0;
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (!value) continue;
+                received += value.byteLength;
+                if (received > expectedLength) failClosed(`分块 ${index} 超过预期长度`);
+                await file.write(value);
+                progress?.setActive(index, received);
+              }
+              if (received !== expectedLength) failClosed(`分块 ${index} 长度不匹配: ${received}/${expectedLength}`);
+            } catch (error) {
+              await reader.cancel(error).catch(() => {});
+              throw error;
+            } finally {
+              activeReaders.delete(reader);
+              reader.releaseLock();
+            }
+          },
+        );
+        await file!.sync();
+        await file!.close();
         file = undefined;
-        if (received !== expectedLength) failClosed(`分块 ${index} 长度不匹配: ${received}/${expectedLength}`);
         await rename(temporary, final);
         await saveCompletion(index);
         progress?.complete(index, expectedLength);
@@ -357,13 +399,14 @@ async function downloadChunks(url: string, directory: string, state: ResumeState
         try { await file?.close(); } catch {}
         try { await unlink(temporary); } catch {}
         if (!firstError && !(workersAbort.signal.aborted && error instanceof DOMException && error.name === "AbortError")) firstError = error;
-        workersAbort.abort(error);
+        await abortWorkers(error);
         return;
       }
     }
   }
 
   await Promise.all(Array.from({ length: Math.min(workerCount, Math.max(1, missing.length)) }, () => worker()));
+  if (abortReadersPromise) await abortReadersPromise;
   operationAbort.signal.removeEventListener("abort", onOperationAbort);
   await stateWrite;
   if (cancellationCode !== 0) throw new CcverError("安装已取消", cancellationCode);
@@ -452,14 +495,21 @@ async function cleanupOwnTemporaries(directory?: string): Promise<void> {
 
 function installSignalHandlers(): void {
   const handlers: Array<[NodeJS.Signals, number]> = [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]];
-  for (const [signal, code] of handlers) {
-    process.on(signal, () => {
+  signalHandlers = handlers.map(([signal, code]) => {
+    const handler = () => {
       if (cancellationCode !== 0) return;
       cancellationCode = code;
       progress?.finish("安装已取消，已验证分块将保留供下次恢复");
       operationAbort.abort(new Error(signal));
-    });
-  }
+    };
+    process.on(signal, handler);
+    return [signal, handler];
+  });
+}
+
+function removeSignalHandlers(): void {
+  for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+  signalHandlers = [];
 }
 
 async function main(): Promise<void> {
@@ -499,20 +549,37 @@ async function main(): Promise<void> {
   progress?.finish(`已安全安装 ${target}`);
 }
 
-try {
-  await main();
-} catch (error) {
-  progress?.finish();
-  await cleanupOwnTemporaries(activeDownloadDirectory);
-  if (cancellationCode !== 0) process.exit(cancellationCode);
-  if (error instanceof CcverError) {
-    process.stderr.write(`ccver: ${error.message}\n`);
-    process.exit(error.exitCode);
+async function run(): Promise<number> {
+  try {
+    await main();
+    return 0;
+  } catch (error) {
+    progress?.finish();
+    await cleanupOwnTemporaries(activeDownloadDirectory);
+    if (cancellationCode !== 0) return cancellationCode;
+    if (error instanceof CcverError) {
+      process.stderr.write(`ccver: ${error.message}\n`);
+      return error.exitCode;
+    }
+    if (isNetworkError(error)) {
+      process.stderr.write(`ccver: 网络错误，可切换官方安装器: ${error instanceof Error ? error.message : String(error)}\n`);
+      return EXIT_FALLBACK;
+    }
+    process.stderr.write(`ccver: 自研安装器内部错误: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    return 70;
+  } finally {
+    progress?.finish();
+    removeSignalHandlers();
   }
-  if (isNetworkError(error)) {
-    process.stderr.write(`ccver: 网络错误，可切换官方安装器: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(EXIT_FALLBACK);
-  }
-  process.stderr.write(`ccver: 自研安装器内部错误: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-  process.exit(70);
 }
+
+// Node 不会仅因为 Promise 未结算而维持事件循环；用一个明确受控的句柄承载整个生命周期，
+// 并在成功或失败结算后统一释放，避免顶层 await 的 rc13 和无活动句柄时提前 rc0。
+const lifecycleKeepAlive = setInterval(() => {}, 1000);
+run().then(
+  (exitCode) => { process.exitCode = exitCode; },
+  (error) => {
+    process.stderr.write(`ccver: 无法结算安装流程: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    process.exitCode = 70;
+  },
+).finally(() => clearInterval(lifecycleKeepAlive));
