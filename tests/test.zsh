@@ -6,7 +6,7 @@ ROOT="${0:A:h:h}"
 NODE_BIN="$(command -v node)"
 for file in "$ROOT"/bin/ccver "$ROOT"/lib/*.zsh "$ROOT"/install.sh; do zsh -n "$file"; done
 "$NODE_BIN" --check "$ROOT/lib/downloader.ts"
-CCVER_TEST_MODULE="$ROOT/lib/downloader.ts" "$NODE_BIN" --input-type=module -e '
+TERM=xterm-256color CCVER_TEST_MODULE="$ROOT/lib/downloader.ts" "$NODE_BIN" --input-type=module -e '
 import { pathToFileURL } from "node:url";
 const { Progress, renderProgressLine, terminalCellWidth } = await import(pathToFileURL(process.env.CCVER_TEST_MODULE).href);
 const narrow = renderProgressLine("⠙", 18, 44.1 * 1024 ** 2, 245 * 1024 ** 2, 1 * 1024 ** 2, "并行下载", 70);
