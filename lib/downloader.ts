@@ -360,6 +360,21 @@ export function terminalCellWidth(value: string): number {
   return width;
 }
 
+function truncateToTerminalWidth(value: string, maximumWidth: number): string {
+  if (maximumWidth <= 0) return "";
+  let result = "";
+  let width = 0;
+  for (const character of value.normalize("NFC")) {
+    const characterWidth = /\p{Mark}/u.test(character) || character === "️"
+      ? 0
+      : isWideCodePoint(character.codePointAt(0) ?? 0) ? 2 : 1;
+    if (width + characterWidth > maximumWidth) break;
+    result += character;
+    width += characterWidth;
+  }
+  return result;
+}
+
 export function renderProgressLine(
   frame: string,
   percent: number,
@@ -379,7 +394,15 @@ export function renderProgressLine(
 
   const compact = `${frame} ${String(percent).padStart(3)}%  ${humanBytes(bytes)}/${humanBytes(total)}  ${humanBytes(speed)}/s`;
   if (terminalCellWidth(compact) < columns) return compact;
-  return `${String(percent).padStart(3)}%  ${humanBytes(bytes)}/${humanBytes(total)}`;
+
+  const progressOnly = `${String(percent).padStart(3)}%  ${humanBytes(bytes)}/${humanBytes(total)}`;
+  if (terminalCellWidth(progressOnly) < columns) return progressOnly;
+
+  const percentOnly = `${percent}%`;
+  if (terminalCellWidth(percentOnly) < columns) return percentOnly;
+
+  // columns=1 时没有任何非空文本能在末列前结束；空帧仍允许 CR/EL 清除旧内容且不会触发 pending-wrap。
+  return truncateToTerminalWidth(frame, columns - 1);
 }
 
 async function downloadChunks(url: string, directory: string, state: ResumeState, statePath: string): Promise<void> {

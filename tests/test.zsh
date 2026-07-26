@@ -14,6 +14,22 @@ if (terminalCellWidth(narrow) >= 70) throw new Error(`窄终端进度行溢出: 
 if (narrow.includes("并行下载")) throw new Error("70 列终端应优先省略阶段文字");
 const wide = renderProgressLine("⠙", 18, 44.1 * 1024 ** 2, 245 * 1024 ** 2, 1 * 1024 ** 2, "并行下载", 100);
 if (!wide.includes("并行下载")) throw new Error("宽终端应保留阶段文字");
+const percentages = [0, 1, 18, 99, 100];
+const byteCases = [
+  [0, 0],
+  [1023, 512],
+  [44.1 * 1024 ** 2, 1 * 1024 ** 2],
+  [245 * 1024 ** 2, 1.3 * 1024 ** 2],
+];
+for (let columns = 1; columns <= 30; columns++) {
+  for (const percent of percentages) {
+    for (const [bytes, speed] of byteCases) {
+      const line = renderProgressLine("⠙", percent, bytes, 245 * 1024 ** 2, speed, "断点恢复 6/16", columns);
+      const width = terminalCellWidth(line);
+      if (width >= columns) throw new Error(`极窄终端溢出: columns=${columns} percent=${percent} bytes=${bytes} width=${width} line=${JSON.stringify(line)}`);
+    }
+  }
+}
 let ttyOutput = "";
 const ttyStream = { isTTY: true, columns: 70, write(value) { ttyOutput += value; return true; } };
 const dynamic = new Progress(245 * 1024 ** 2, 0, ttyStream);
