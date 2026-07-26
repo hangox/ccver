@@ -311,6 +311,39 @@ set -e
 worker_pid="$(grep '^worker=' "$CCVER_EVENTS" | tail -1 | cut -d= -f2)"
 [[ -z "$worker_pid" ]] || ! kill -0 "$worker_pid" 2>/dev/null
 
+# root installer 自行成功退出但留下忽略所有普通信号的孙进程时，也必须清空 PGID 后返回 root rc。
+cat > "$sandbox/bin/claude" <<'MOCK_ROOT_EXIT'
+#!/bin/zsh
+zsh -c 'trap "" INT TERM HUP; while true; do sleep 0.1; done' &
+print "root-exit-worker=$!" >> "$CCVER_EVENTS"
+exit 0
+MOCK_ROOT_EXIT
+chmod +x "$sandbox/bin/claude"
+: > "$CCVER_EVENTS"
+TERM=dumb ccver_run_official_install 9.9.8 >/dev/null 2>&1
+[[ "$?" -eq 0 ]]
+root_exit_worker="$(grep '^root-exit-worker=' "$CCVER_EVENTS" | tail -1 | cut -d= -f2)"
+[[ -n "$root_exit_worker" ]] || return 1
+! kill -0 "$root_exit_worker" 2>/dev/null
+
+# manifest 不可用时，即使 final 具有可信签名身份，也不能冒充任意目标版本。
+command cp "$CCVER_TEST_BINARY" "$CCVER_VERSIONS_DIR/9.9.9"
+chmod +x "$CCVER_VERSIONS_DIR/9.9.9"
+old_link="$(readlink "$CCVER_BIN_LINK")"
+old_pin="$(ccver_pinned)"
+: > "$CCVER_EVENTS"
+set +e
+TERM=dumb ccver_install_preserve_default 9.9.9 >/dev/null 2>&1
+masked_install_rc=$?
+ccver_switch_default 9.9.9 >/dev/null 2>&1
+masked_use_rc=$?
+ccver_installed_is_trusted 9.9.9 >/dev/null 2>&1
+masked_pin_rc=$?
+set -e
+[[ "$masked_install_rc" -eq 73 && "$masked_use_rc" -eq 73 && "$masked_pin_rc" -eq 73 ]]
+[[ ! -s "$CCVER_EVENTS" ]]
+[[ "$(readlink "$CCVER_BIN_LINK")" == "$old_link" && "$(ccver_pinned)" == "$old_pin" ]]
+
 # 官方失败 rc 原样传递且默认 link/pin 保持。
 cat > "$sandbox/bin/claude" <<'MOCK_FAIL'
 #!/bin/zsh

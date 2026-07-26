@@ -47,7 +47,7 @@ function main() {
                 [[ "$rc" -eq 0 ]] || return "$rc"
             fi
             [[ -e "$CCVER_VERSIONS_DIR/$target" ]] || { echo "未安装版本 $target" >&2; return 1; }
-            ccver_verify_installed "$target"; rc=$?
+            ccver_installed_is_trusted "$target"; rc=$?
             [[ "$rc" -eq 0 ]] || return "$rc"
             ccver_pin_only "$target"
             ;;

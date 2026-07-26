@@ -41,18 +41,24 @@ function ccver_signal_group() {
     kill -"$signal" -- -"$pgid" 2>/dev/null || true
 }
 
-function ccver_wait_cancelled_group() {
-    local root_pid="$1" pgid="$2" cancel_code="$3" started="$EPOCHSECONDS" escalated=0 killed=0
+function ccver_drain_process_group() {
+    local pgid="$1" term_after="${2:-0}" kill_after="${3:-2}" started="$EPOCHSECONDS" terminated=0 killed=0
     while ccver_group_alive "$pgid"; do
-        if [[ "$escalated" -eq 0 && "$((EPOCHSECONDS - started))" -ge 2 ]]; then
-            escalated=1
+        if [[ "$terminated" -eq 0 && "$((EPOCHSECONDS - started))" -ge "$term_after" ]]; then
+            terminated=1
             ccver_signal_group TERM "$pgid"
-        elif [[ "$killed" -eq 0 && "$((EPOCHSECONDS - started))" -ge 5 ]]; then
+        elif [[ "$killed" -eq 0 && "$((EPOCHSECONDS - started))" -ge "$kill_after" ]]; then
             killed=1
             ccver_signal_group KILL "$pgid"
         fi
         sleep 0.1
     done
+}
+
+function ccver_wait_cancelled_group() {
+    local root_pid="$1" pgid="$2" cancel_code="$3"
+    # 首次取消信号已由 trap 发送；给目标组 2 秒自行清理，再升级 TERM，5 秒后 KILL。
+    ccver_drain_process_group "$pgid" 2 5
     wait "$root_pid" 2>/dev/null || true
     return "$cancel_code"
 }
@@ -87,6 +93,8 @@ function ccver_run_official_install() {
         return $?
     fi
     wait "$installer_pid"; install_rc=$?
+    # root 正常或异常退出都不代表其子孙结束；清空独立 PGID 后才可返回 root 原始 rc。
+    ccver_drain_process_group "$installer_pgid" 0 2
     trap - INT TERM HUP
     return "$install_rc"
 }
@@ -161,9 +169,11 @@ function ccver_installed_is_trusted() {
     local target="$1" verify_rc
     ccver_verify_release "$target"; verify_rc=$?
     [[ "$verify_rc" -eq 0 ]] && return 0
-    [[ "$verify_rc" -eq 75 ]] || return "$verify_rc"
-    # 无法取得本轮 manifest 时，仅接受固定 Anthropic Developer ID 身份；未知或损坏 final 不得 fallback 覆盖。
-    ccver_verify_installed "$target"
+    if [[ "$verify_rc" -eq 75 ]]; then
+        echo "无法取得版本 $target 的官方 manifest，拒绝将现有文件绑定为该版本" >&2
+        return 73
+    fi
+    return "$verify_rc"
 }
 
 function ccver_install_preserve_default() {
@@ -208,7 +218,7 @@ function ccver_ensure_installed() {
 function ccver_switch_default() {
     local target="$1" verify_rc
     [[ -e "$CCVER_VERSIONS_DIR/$target" ]] || { echo "未安装版本 $target" >&2; return 1; }
-    ccver_verify_installed "$target"; verify_rc=$?
+    ccver_installed_is_trusted "$target"; verify_rc=$?
     [[ "$verify_rc" -eq 0 ]] || return "$verify_rc"
     command mkdir -p "${CCVER_BIN_LINK:h}" || return 1
     local temporary="$CCVER_BIN_LINK.tmp.$$"
