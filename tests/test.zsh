@@ -37,6 +37,20 @@ source "$ROOT/lib/pin.zsh"
 source "$ROOT/lib/progress.zsh"
 source "$ROOT/lib/installer.zsh"
 
+# renderer 使用固定宽度进度条，且超出 total 时不伪造百分比。
+[[ "$(ccver_progress_bar 0)" == '--------------------' ]]
+[[ "$(ccver_progress_bar 50)" == '==========----------' ]]
+[[ "$(ccver_progress_bar 100)" == '====================' ]]
+[[ "$(ccver_render_progress 5 50 100 10 x)" == *'[==========----------]  50%'* ]]
+[[ "$(ccver_render_progress 5 101 100 10 x)" != *'%'* ]]
+render_controls="$sandbox/render-controls"
+{
+    ccver_progress_begin
+    ccver_progress_draw 'line'
+    ccver_progress_finish
+} 2> "$render_controls"
+[[ "$(od -An -tx1 -v "$render_controls" | tr -d ' \n')" == '1b5b3f32356c0d1b5b324b6c696e650d1b5b324b1b5b3f3235680a' ]]
+
 # 非 TTY 不查询 metadata，installer rc 原样传递。
 ccver_manifest_size() { print manifest >> "$CCVER_EVENTS"; return 1; }
 set +e

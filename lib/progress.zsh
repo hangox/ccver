@@ -81,15 +81,27 @@ function ccver_find_staging_file() {
     [[ "$REPLY_COUNT" -eq 1 && -n "$REPLY" ]]
 }
 
+function ccver_progress_bar() {
+    local percent="$1" width=20 filled empty
+    filled=$((percent * width / 100)); empty=$((width - filled))
+    printf '%*s' "$filled" '' | tr ' ' '='
+    printf '%*s' "$empty" '' | tr ' ' '-'
+}
+
+function ccver_progress_begin() { printf '\033[?25l' >&2; }
+function ccver_progress_draw() { printf '\r\033[2K%s' "$1" >&2; }
+function ccver_progress_finish() { printf '\r\033[2K\033[?25h\n' >&2; }
+
 function ccver_render_progress() {
-    local elapsed="$1" bytes="$2" total="$3" speed="$4" frame="$5"
+    local elapsed="$1" bytes="$2" total="$3" speed="$4" frame="$5" percent bar
     if [[ "$total" -gt 0 && "$bytes" -gt 0 && "$bytes" -le "$total" ]]; then
-        printf '%s 下载 %3d%%  %s / %s  %s/s  已等待 %ds' "$frame" "$((bytes * 100 / total))" \
+        percent="$((bytes * 100 / total))"; bar="$(ccver_progress_bar "$percent")"
+        printf '%s [%s] %3d%%  %s/%s  %s/s  %ds' "$frame" "$bar" "$percent" \
             "$(ccver_human_bytes "$bytes")" "$(ccver_human_bytes "$total")" "$(ccver_human_bytes "$speed")" "$elapsed"
     elif [[ "$bytes" -gt 0 ]]; then
-        printf '%s 下载中  已接收 %s  %s/s  已等待 %ds' "$frame" "$(ccver_human_bytes "$bytes")" "$(ccver_human_bytes "$speed")" "$elapsed"
+        printf '%s 下载中  %s  %s/s  %ds' "$frame" "$(ccver_human_bytes "$bytes")" "$(ccver_human_bytes "$speed")" "$elapsed"
     else
-        printf '%s 等待安装器创建下载文件  已等待 %ds' "$frame" "$elapsed"
+        printf '%s 等待安装器创建下载文件  %ds' "$frame" "$elapsed"
     fi
 }
 
@@ -97,7 +109,7 @@ function ccver_install_with_progress() {
     setopt localtraps
     zmodload zsh/datetime 2>/dev/null || true
     local target="$1" installer_pid install_rc total=0 start now bytes=0 previous_bytes=0 previous_time speed=0 file=""
-    local observer_ok=1 percent_ok=1 REPLY="" REPLY_COUNT=0 candidate_bytes frame_index=1 line
+    local observer_ok=1 percent_ok=1 REPLY="" REPLY_COUNT=0 candidate_bytes frame_index=1 line last_line=""
     local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
     if [[ ! -t 2 || "${TERM:-dumb}" == dumb ]]; then
@@ -113,6 +125,7 @@ function ccver_install_with_progress() {
     trap 'kill -HUP "$installer_pid" 2>/dev/null' HUP
     total="$(ccver_manifest_size "$target" 2>/dev/null)" || total=0
 
+    ccver_progress_begin
     while kill -0 "$installer_pid" 2>/dev/null; do
         now=$EPOCHSECONDS
         REPLY=""; REPLY_COUNT=0
@@ -132,11 +145,14 @@ function ccver_install_with_progress() {
         local shown_total="$total"
         [[ "$observer_ok" -eq 0 || "$percent_ok" -eq 0 ]] && shown_total=0
         line="$(ccver_render_progress "$((now - start))" "$bytes" "$shown_total" "$speed" "${frames[$frame_index]}" 2>/dev/null)" || line="安装中"
-        printf '\r\033[K%s' "$line" >&2
-        frame_index=$((frame_index % ${#frames[@]} + 1)); sleep 0.2
+        if [[ "$line" != "$last_line" ]]; then
+            ccver_progress_draw "$line"
+            last_line="$line"
+        fi
+        frame_index=$((frame_index % ${#frames[@]} + 1)); sleep 1
     done
     wait "$installer_pid"; install_rc=$?
     trap - INT TERM HUP
-    printf '\r\033[K' >&2
+    ccver_progress_finish
     return "$install_rc"
 }
