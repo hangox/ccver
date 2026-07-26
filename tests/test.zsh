@@ -8,12 +8,28 @@ for file in "$ROOT"/bin/ccver "$ROOT"/lib/*.zsh "$ROOT"/install.sh; do zsh -n "$
 "$NODE_BIN" --check "$ROOT/lib/downloader.ts"
 CCVER_TEST_MODULE="$ROOT/lib/downloader.ts" "$NODE_BIN" --input-type=module -e '
 import { pathToFileURL } from "node:url";
-const { renderProgressLine, terminalCellWidth } = await import(pathToFileURL(process.env.CCVER_TEST_MODULE).href);
+const { Progress, renderProgressLine, terminalCellWidth } = await import(pathToFileURL(process.env.CCVER_TEST_MODULE).href);
 const narrow = renderProgressLine("⠙", 18, 44.1 * 1024 ** 2, 245 * 1024 ** 2, 1 * 1024 ** 2, "并行下载", 70);
 if (terminalCellWidth(narrow) >= 70) throw new Error(`窄终端进度行溢出: ${terminalCellWidth(narrow)}`);
 if (narrow.includes("并行下载")) throw new Error("70 列终端应优先省略阶段文字");
 const wide = renderProgressLine("⠙", 18, 44.1 * 1024 ** 2, 245 * 1024 ** 2, 1 * 1024 ** 2, "并行下载", 100);
 if (!wide.includes("并行下载")) throw new Error("宽终端应保留阶段文字");
+let ttyOutput = "";
+const ttyStream = { isTTY: true, columns: 70, write(value) { ttyOutput += value; return true; } };
+const dynamic = new Progress(245 * 1024 ** 2, 0, ttyStream);
+dynamic.setPhase("并行下载");
+dynamic.begin();
+dynamic.finish("完成");
+if (!ttyOutput.startsWith("\x1b[?25l\r\x1b[2K")) throw new Error("TTY 开始控制序列不完整");
+if (!ttyOutput.endsWith("\r\x1b[2K\x1b[?25h完成\n")) throw new Error("TTY 结束控制序列不完整");
+if (ttyOutput.slice(0, -1).includes("\n")) throw new Error("TTY 动态帧中出现了换行");
+let staticOutput = "";
+const staticStream = { isTTY: false, columns: undefined, write(value) { staticOutput += value; return true; } };
+const staticProgress = new Progress(100, 0, staticStream);
+staticProgress.setPhase("并行下载");
+staticProgress.begin();
+staticProgress.finish("完成");
+if (staticOutput !== "并行下载\n完成\n") throw new Error(`非 TTY 降级输出异常: ${JSON.stringify(staticOutput)}`);
 '
 "$NODE_BIN" --check "$ROOT/tests/downloader-runner.ts"
 "$NODE_BIN" --check "$ROOT/tests/http-server.ts"

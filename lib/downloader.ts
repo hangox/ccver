@@ -27,6 +27,7 @@ const CODESIGN_PATH = "/usr/bin/codesign";
 
 type RuntimeDependencies = {
   signatureError: (path: string) => string | undefined;
+  progressStream?: NodeJS.WriteStream;
 };
 
 let runtimeDependencies: RuntimeDependencies;
@@ -74,7 +75,6 @@ const assemblyDir = process.env.CCVER_ASSEMBLY_DIR ?? join(versionsDir, ".ccver-
 const workerCount = boundedInteger(process.env.CCVER_DOWNLOAD_WORKERS, 6, 1, 8);
 const chunkSize = boundedInteger(process.env.CCVER_CHUNK_SIZE, 16 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024);
 const requestTimeoutMs = boundedInteger(process.env.CCVER_REQUEST_TIMEOUT_MS, 120_000, 1_000, 300_000);
-const isTTY = Boolean(process.stderr.isTTY) && process.env.TERM !== "dumb";
 const operationAbort = new AbortController();
 let cancellationCode = 0;
 let progress: Progress | undefined;
@@ -239,8 +239,19 @@ async function verifyCompletedChunks(directory: string, state: ResumeState): Pro
   }
 }
 
-class Progress {
+function supportsAnsiProgress(stream: NodeJS.WriteStream): boolean {
+  const term = process.env.TERM ?? "";
+  return Boolean(stream.isTTY)
+    && term !== ""
+    && term !== "dumb"
+    && term !== "unknown"
+    && (stream.columns ?? 0) > 1;
+}
+
+export class Progress {
   private readonly total: number;
+  private readonly stream: NodeJS.WriteStream;
+  private readonly dynamic: boolean;
   private interval?: NodeJS.Timeout;
   private readonly active = new Map<number, number>();
   private completedBytes = 0;
@@ -251,22 +262,24 @@ class Progress {
   private phase = "准备下载";
   private activeDisplay = false;
 
-  constructor(total: number, initialBytes: number) {
+  constructor(total: number, initialBytes: number, stream?: NodeJS.WriteStream) {
     this.total = total;
     this.completedBytes = initialBytes;
+    this.stream = stream ?? runtimeDependencies?.progressStream ?? process.stderr;
+    this.dynamic = supportsAnsiProgress(this.stream);
   }
 
   begin(): void {
-    if (!isTTY) return;
+    if (!this.dynamic) return;
     this.activeDisplay = true;
-    process.stderr.write("[?25l");
+    this.stream.write("[?25l");
     this.draw();
     this.interval = setInterval(() => this.draw(), 1000);
   }
 
   setPhase(value: string): void {
     this.phase = value;
-    if (!isTTY) process.stderr.write(`${value}\n`);
+    if (!this.dynamic) this.stream.write(`${value}\n`);
   }
 
   setActive(index: number, bytes: number): void {
@@ -282,11 +295,11 @@ class Progress {
     if (this.interval) clearInterval(this.interval);
     this.interval = undefined;
     if (this.activeDisplay) {
-      process.stderr.write("\r[2K[?25h");
-      if (message) process.stderr.write(`${message}\n`);
-      else process.stderr.write("\n");
+      this.stream.write("\r[2K[?25h");
+      if (message) this.stream.write(`${message}\n`);
+      else this.stream.write("\n");
     } else if (message) {
-      process.stderr.write(`${message}\n`);
+      this.stream.write(`${message}\n`);
     }
     this.activeDisplay = false;
   }
@@ -308,9 +321,9 @@ class Progress {
       this.total,
       this.speed,
       this.phase,
-      process.stderr.columns,
+      this.stream.columns,
     );
-    process.stderr.write(`\r[2K${line}`);
+    this.stream.write(`\r[2K${line}`);
   }
 }
 
