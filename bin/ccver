@@ -5,6 +5,7 @@ CCVER_ROOT="${0:A:h:h}"
 source "$CCVER_ROOT/lib/config.zsh"
 source "$CCVER_ROOT/lib/versions.zsh"
 source "$CCVER_ROOT/lib/pin.zsh"
+export CCVER_ROOT
 source "$CCVER_ROOT/lib/progress.zsh"
 source "$CCVER_ROOT/lib/installer.zsh"
 source "$CCVER_ROOT/lib/ui.zsh"
