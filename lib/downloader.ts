@@ -72,7 +72,7 @@ const cacheHome = process.env.CCVER_CACHE_HOME ?? join(process.env.HOME ?? "", "
 const versionsDir = process.env.CCVER_VERSIONS_DIR ?? join(process.env.HOME ?? "", ".local/share/claude/versions");
 const downloadsDir = process.env.CCVER_DOWNLOADS_DIR ?? join(cacheHome, "ccver/downloads");
 const assemblyDir = process.env.CCVER_ASSEMBLY_DIR ?? join(versionsDir, ".ccver-staging");
-const workerCount = boundedInteger(process.env.CCVER_DOWNLOAD_WORKERS, 6, 1, 8);
+const workerCount = resolveDownloadWorkers();
 const chunkSize = boundedInteger(process.env.CCVER_CHUNK_SIZE, 16 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024);
 const requestTimeoutMs = boundedInteger(process.env.CCVER_REQUEST_TIMEOUT_MS, 120_000, 1_000, 300_000);
 const operationAbort = new AbortController();
@@ -86,6 +86,10 @@ function boundedInteger(value: string | undefined, defaultValue: number, min: nu
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) failClosed(`配置值超出范围: ${value}`);
   return parsed;
+}
+
+export function resolveDownloadWorkers(value = process.env.CCVER_DOWNLOAD_WORKERS): number {
+  return boundedInteger(value, 2, 1, 8);
 }
 
 function platformName(): string {

@@ -25,8 +25,8 @@ ccver — Claude Code native 多版本管理器
                                    无参数查看 pin；有参数时必要时安装并锁定
   ccver unpin                      清除 pin
 
-原则：默认使用官方 manifest 与 CDN 进行可恢复并行下载，并严格校验
-size、SHA-256 与 Anthropic Developer ID 签名；仅在安全的可恢复故障下
+原则：默认使用 2 路并发，从官方 manifest 与 CDN 进行可恢复分块下载，并严格校验
+size、SHA-256 与 Anthropic Developer ID 签名；可用 CCVER_DOWNLOAD_WORKERS=1–8 覆盖，仅在安全的可恢复故障下
 退回 `claude install <target>`，完整性或并发冲突会直接停止。
 EOF
 }

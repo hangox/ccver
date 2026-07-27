@@ -8,7 +8,9 @@ for file in "$ROOT"/bin/ccver "$ROOT"/lib/*.zsh "$ROOT"/install.sh; do zsh -n "$
 "$NODE_BIN" --check "$ROOT/lib/downloader.ts"
 TERM=xterm-256color CCVER_TEST_MODULE="$ROOT/lib/downloader.ts" "$NODE_BIN" --input-type=module -e '
 import { pathToFileURL } from "node:url";
-const { Progress, renderProgressLine, terminalCellWidth } = await import(pathToFileURL(process.env.CCVER_TEST_MODULE).href);
+const { Progress, renderProgressLine, resolveDownloadWorkers, terminalCellWidth } = await import(pathToFileURL(process.env.CCVER_TEST_MODULE).href);
+if (resolveDownloadWorkers(undefined) !== 2) throw new Error("默认下载并发应为 2");
+if (resolveDownloadWorkers("1") !== 1 || resolveDownloadWorkers("8") !== 8) throw new Error("下载并发环境覆盖失效");
 const narrow = renderProgressLine("⠙", 18, 44.1 * 1024 ** 2, 245 * 1024 ** 2, 1 * 1024 ** 2, "并行下载", 70);
 if (terminalCellWidth(narrow) >= 70) throw new Error(`窄终端进度行溢出: ${terminalCellWidth(narrow)}`);
 if (narrow.includes("并行下载")) throw new Error("70 列终端应优先省略阶段文字");
@@ -161,7 +163,7 @@ export CCVER_DOWNLOADS_DIR="$sandbox/downloads"
 export CCVER_ASSEMBLY_DIR="$XDG_DATA_HOME/claude/versions/.ccver-staging"
 export CCVER_VERSIONS_DIR="$XDG_DATA_HOME/claude/versions"
 export CCVER_VERSION_LOCKS_DIR="$XDG_DATA_HOME/ccver/version-locks"
-export CCVER_CHUNK_SIZE=65536 CCVER_DOWNLOAD_WORKERS=4 CCVER_REQUEST_TIMEOUT_MS=5000
+export CCVER_CHUNK_SIZE=65536 CCVER_DOWNLOAD_WORKERS CCVER_REQUEST_TIMEOUT_MS=5000
 function ccver_downloader() {
     local mode="$1" target="$2"
     ccver_node_supported || return 75
@@ -185,7 +187,7 @@ TERM=dumb ccver_install_preserve_default 9.9.1 >/dev/null 2>&1
 [[ "$(readlink "$CCVER_BIN_LINK")" == "$CCVER_VERSIONS_DIR/1.0.0" ]]
 [[ "$(ccver_pinned)" == 1.0.0 ]]
 max_active="$(grep -Eo 'max=[0-9]+' "$http_events" | cut -d= -f2 | sort -n | tail -1)"
-[[ "$max_active" -ge 2 ]]
+[[ "$CCVER_DOWNLOAD_WORKERS" -eq 2 && "$max_active" -eq 2 ]]
 
 # 删除最终版本后重新运行必须复用全部已验证 chunks，不再发送数据 Range。
 trash "$CCVER_VERSIONS_DIR/9.9.1"

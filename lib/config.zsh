@@ -11,7 +11,7 @@
 : "${CCVER_ASSEMBLY_DIR:=$CCVER_VERSIONS_DIR/.ccver-staging}"
 : "${CCVER_VERSION_LOCKS_DIR:=$CCVER_DATA_HOME/ccver/version-locks}"
 : "${CCVER_NODE_BIN:=$(command -v node 2>/dev/null)}"
-: "${CCVER_DOWNLOAD_WORKERS:=6}"
+: "${CCVER_DOWNLOAD_WORKERS:=2}"
 : "${CCVER_CHUNK_SIZE:=16777216}"
 : "${CCVER_REQUEST_TIMEOUT_MS:=120000}"
 : "${CCVER_NPM_PACKAGE:=@anthropic-ai/claude-code}"
